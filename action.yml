@@ -34,6 +34,9 @@ inputs:
   config-file:
     description: "Path to configuration file"
     required: false
+outputs:
+  json:
+    description: 'JSON output of broken links. Example: `[{"link":"https://example.com/broken.html","file":"README.md","line_num":5}]`. This will be an empty list if no links are broken.'
 runs:
   using: "docker"
   image: "Dockerfile"

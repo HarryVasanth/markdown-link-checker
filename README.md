@@ -103,6 +103,12 @@ with:
 > - `files: "README.md,CONTRIBUTING.md"`
 > - `files: "README.md, CONTRIBUTING.md docs/guide.md"`
 
+## Outputs
+
+| Output        | Description                                                            | Required | Default |
+| ------------- | ---------------------------------------------------------------------- | -------- | ------- |
+| `json`        | JSON output of broken links. Example: `[{"link":"https://example.com/broken.html","file":"README.md","line_num":5}]`. This will be an empty list if no links are broken. | No       | `.`     |
+
 ## Configuration File
 
 You can use a configuration file to set options for the link checker. Create a file (e.g., `.linkcheck.conf`) with the following format:

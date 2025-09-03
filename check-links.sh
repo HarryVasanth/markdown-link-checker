@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 # Input variables
 PATH_TO_CHECK="${INPUT_PATH:-.}"
@@ -32,6 +31,20 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
 fi
+
+# Function to add a link/file/line_num as a JSON dict to the JSON list of broken links
+add_to_json() {
+    local link="$1"
+    local file="${2#./}" # filename should not have a leading dot-slash. Eg. we want 'README.md' instead of './README.md'
+    local line_num="$3"
+
+    cat $FILE_LIST | jq \
+      --arg link "$link" \
+      --arg file "$file" \
+      --argjson line_num "$line_num" \
+      '. + [{"link": $link, "file": $file, "line_num": $line_num}]' > "$FILE_LIST".new
+    mv "$FILE_LIST".new "$FILE_LIST"
+}
 
 # Function to check a single URL
 check_url() {
@@ -165,6 +178,9 @@ check_file() {
         TOTAL_LINKS=$((TOTAL_LINKS + 1))
 
         check_url "$link" "$file" "$line_num"
+        if [ "$?" -eq 1 ]; then
+            add_to_json "$link" "$file" "$line_num"
+        fi
     done < <(perl -ne '
         while (/\[([^\]]+)\]\(\s*(<)?((?:[^()<>]|<[^<>]*>|\([^()]*\))*)(?(2)>)\s*\)/g) {
             print "$.:$3\n";
@@ -185,6 +201,9 @@ check_file() {
         TOTAL_LINKS=$((TOTAL_LINKS + 1))
 
         check_url "$link" "$file" "$line_num"
+        if [ "$?" -eq 1 ]; then
+            add_to_json "$link" "$file" "$line_num"
+        fi
     done < <(grep -n -o '<a [^>]*href="[^"]*"[^>]*>' "$file" | sed -E 's/([0-9]+):.*href="([^"]*)".*>/\1:\2/g')
 
     # Extract image links ![alt](url)
@@ -204,6 +223,9 @@ check_file() {
         TOTAL_LINKS=$((TOTAL_LINKS + 1))
 
         check_url "$link" "$file" "$line_num"
+        if [ "$?" -eq 1 ]; then
+            add_to_json "$link" "$file" "$line_num"
+        fi
     done < <(perl -ne '
         while (/!\[[^\]]*\]\(\s*(<)?((?:[^()<>]|<[^<>]*>|\([^()]*\))*)(?(1)>)\s*\)/g) {
             print "$.:$2\n";
@@ -231,6 +253,10 @@ if [ -n "$EXCLUDE" ]; then
     done
 fi
 
+FILE_LIST=$(mktemp /tmp/file_list.XXXXXX.json)
+trap 'rm -f "$FILE_LIST"' EXIT
+echo '[]' > "$FILE_LIST"
+
 # Get list of files to check
 if [ -n "$FILES" ]; then
     FILES_NORMALIZED=$(echo "$FILES" | tr ',' ' ')
@@ -246,6 +272,11 @@ else
     while IFS= read -r file; do
         check_file "$file"
     done < <(eval "$FIND_CMD")
+fi
+
+# Echo the JSON list of broken links to the GitHub output
+if [ -n "$GITHUB_OUTPUT" ]; then
+    echo "json=$(cat "$FILE_LIST" | jq -c .)" >> "$GITHUB_OUTPUT"
 fi
 
 # Print summary
