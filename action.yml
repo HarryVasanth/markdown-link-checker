@@ -10,17 +10,17 @@ inputs:
     required: false
     default: "."
   files:
-    description: "Specific markdown files to check (comma-separated)"
+    description: "Specific markdown files to check (comma or space separated)"
     required: false
   exclude:
-    description: "Files or directories to exclude (comma-separated)"
+    description: "Files or directories to exclude (comma or space separated)"
     required: false
   recursive:
     description: "Check files recursively"
     required: false
     default: "true"
   timeout:
-    description: "Timeout for HTTP requests in seconds"
+    description: "Timeout for HTTP requests in seconds (both connect and max-time)"
     required: false
     default: "10"
   retry-count:
@@ -34,9 +34,16 @@ inputs:
   config-file:
     description: "Path to configuration file"
     required: false
+  ignore-urls:
+    description: "Comma-separated list of URLs or string patterns to ignore (e.g., 'localhost,example.com')"
+    required: false
+  user-agent:
+    description: "Custom User-Agent header for HTTP requests to prevent 403 blocks"
+    required: false
+    default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 outputs:
   json:
-    description: 'JSON output of broken links. Example: `[{"link":"https://example.com/broken.html","file":"README.md","line_num":5}]`. This will be an empty list if no links are broken.'
+    description: 'JSON output of broken links. Example: `[{"link":"https://example.com/broken","file":"README.md","line_num":5,"status":"404"}]`'
 runs:
   using: "docker"
   image: "Dockerfile"
