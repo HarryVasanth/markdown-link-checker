@@ -1,5 +1,5 @@
 name: "Markdown Link Checker"
-description: "Checks all hyperlinks in Markdown files for broken links and reports their status"
+description: "Checks all hyperlinks in Markdown files for broken links, fragments, and file references, with retries, caching, and JSON output"
 author: "HarryVasanth"
 branding:
   icon: "link"
