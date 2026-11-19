@@ -1,4 +1,4 @@
-FROM alpine:3
+FROM alpine:3.24.4
 
 COPY check-links.sh /check-links.sh
 RUN chmod +x /check-links.sh && \

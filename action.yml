@@ -1,5 +1,5 @@
 name: "Markdown Link Checker"
-description: "Checks all hyperlinks in Markdown files for broken links, fragments, and file references, with retries, caching, and JSON output"
+description: "Checks all hyperlinks in Markdown files for broken links, fragments and file references, with retries, caching, annotations, a step summary and JSON output"
 author: "HarryVasanth"
 branding:
   icon: "link"
@@ -20,22 +20,26 @@ inputs:
     required: false
     default: "true"
   timeout:
-    description: "Timeout for HTTP requests in seconds (both connect and max-time)"
+    description: "Connect timeout in seconds (the total request time is capped at 2x this value)"
     required: false
     default: "10"
   retry-count:
-    description: "Number of retries for failed requests"
+    description: "Maximum attempts per URL. 0 or 1 means a single attempt. Only 000/408/425/429/5xx are retried"
     required: false
     default: "3"
   verbose:
     description: "Show detailed output"
     required: false
     default: "false"
+  quiet:
+    description: "Only print broken links and the final summary"
+    required: false
+    default: "false"
   config-file:
     description: "Path to configuration file"
     required: false
   ignore-urls:
-    description: "Comma-separated list of URLs or string patterns to ignore (e.g., 'localhost,example.com')"
+    description: "Comma-separated URL substrings or globs to ignore (e.g., 'localhost,https://*.example.com/*')"
     required: false
   user-agent:
     description: "Custom User-Agent header for HTTP requests to prevent 403 blocks"
@@ -44,6 +48,12 @@ inputs:
 outputs:
   json:
     description: 'JSON output of broken links. Example: `[{"link":"https://example.com/broken","file":"README.md","line_num":5,"status":"404"}]`'
+  broken_count:
+    description: "Number of broken link occurrences found."
+  checked_files:
+    description: "Number of files scanned."
+  total_links:
+    description: "Number of links scanned."
 runs:
   using: "docker"
   image: "Dockerfile"

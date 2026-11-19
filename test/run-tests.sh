@@ -59,6 +59,7 @@ run_check() {
 			PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
 			HOME="$sb" \
 			GITHUB_OUTPUT="$sb/gh.out" \
+			GITHUB_STEP_SUMMARY="$sb/summary" \
 			FAKE_CURL_LOG="$sb/curl.log" \
 			FAKE_CURL_STATE="$sb/.state" \
 			"$@" \
@@ -67,16 +68,37 @@ run_check() {
 	)
 }
 
+# Run the checker with CLI arguments instead of INPUT_* env vars.
+run_cli() {
+	local sb="$1"
+	shift
+	(
+		cd "$sb" || exit 99
+		env -i \
+			PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+			HOME="$sb" \
+			GITHUB_OUTPUT="$sb/gh.out" \
+			GITHUB_STEP_SUMMARY="$sb/summary" \
+			FAKE_CURL_LOG="$sb/curl.log" \
+			FAKE_CURL_STATE="$sb/.state" \
+			bash "$CHECK" "$@" >"$sb/stdout" 2>"$sb/stderr"
+		echo $? >"$sb/exit"
+	)
+}
+
 assert_exit() { [ "$(cat "$2/exit")" = "$1" ] || fail "$3 (exit=$(cat "$2/exit") want=$1)"; }
 assert_grep() { grep -q -- "$1" "$2" || fail "$3 (missing '$1' in $2)"; }
-# jq filter against sandbox/gh.out (strip the `json=` prefix) must be truthy
-assert_json() { sed 's/^json=//' "$2/gh.out" | jq -e "$1" >/dev/null 2>&1 || fail "$3 (jq '$1' failed)"; }
+# jq filter against the `json=` line of sandbox/gh.out must be truthy
+assert_json() { grep '^json=' "$2/gh.out" | sed 's/^json=//' | jq -e "$1" >/dev/null 2>&1 || fail "$3 (jq '$1' failed)"; }
+assert_out() { grep -qx -- "$1=$2" "$3/gh.out" || fail "$3 (missing output $1=$2)"; }
+assert_summary() { grep -q -- "$1" "$2/summary" || fail "$3 (summary missing '$1')"; }
 assert_crlog() {
 	local c=0
 	[ -s "$2/curl.log" ] && c=$(grep -c '^ARGS' "$2/curl.log")
 	[ "$c" = "$1" ] || fail "$3 (curl calls=$c want=$1)"
 }
 assert_arg() { grep -q -- "$1" "$2/curl.log" || fail "$3 (curl missing arg '$1')"; }
+refute_grep() { grep -q -- "$1" "$2" && fail "$3 (unexpected '$1' in $2)" || true; }
 
 ok() {
 	PASS=$((PASS + 1))
@@ -252,6 +274,19 @@ t() {
 }
 t
 
+test_case "shortcut references [id] and ![id] are checked once"
+t() {
+	local sb
+	sb="$(gen_sb shortcut)"
+	gen_md "$sb/s.md" '[ref]: https://broken.example/ref\n[pic]: https://broken.example/pic\n\nSee [ref] and ![pic].\n'
+	run_check "$sb" INPUT_PATH=s.md INPUT_RETRY_COUNT=0
+	assert_exit 1 "$sb" "shortcut refs must be checked"
+	assert_out total_links 2 "$sb" "definition lines must not be counted twice"
+	assert_crlog 2 "$sb" "each shortcut URL fetched once"
+	ok "shortcut references and images checked"
+}
+t
+
 test_case "autolinks <scheme:...> and mailto/tel schemes never reported broken"
 t() {
 	local sb
@@ -416,7 +451,12 @@ t() {
 	run_check "$sb" INPUT_RETRY_COUNT=0
 	assert_exit 1 "$sb" "must exit 1"
 	assert_json '. | type == "array"' "$sb" "gh.out must be json array"
-	ok "github output json"
+	assert_out broken_count 2 "$sb"
+	assert_out total_links 2 "$sb"
+	assert_out checked_files 1 "$sb"
+	assert_summary "Markdown Link Checker" "$sb" "summary header missing"
+	assert_summary "https://broken.example/a" "$sb" "summary must list the broken link"
+	ok "github output json + count outputs + step summary"
 }
 t
 
@@ -490,7 +530,322 @@ t() {
 	assert_arg "14" "$sb" "2x timeout max-time"
 	assert_arg "TestAgent/9.9" "$sb" "user agent"
 	assert_arg "--proto" "$sb" "scheme guard flag"
+	assert_arg "--proto-redir" "$sb" "redirect scheme guard"
+	assert_arg "--globoff" "$sb" "URL globbing disabled"
 	ok "curl flags verified"
+}
+t
+
+test_case "uppercase schemes and protocol-relative URLs are external"
+t() {
+	local sb
+	sb="$(gen_sb schemes)"
+	gen_md "$sb/s.md" '[a](HTTPS://broken.example/up)\n[b](//broken.example/rel)\n'
+	run_check "$sb" INPUT_PATH=s.md INPUT_RETRY_COUNT=0
+	assert_exit 1 "$sb" "both malformed-scheme links must be checked"
+	assert_json 'length == 2' "$sb" "both external links must be in json"
+	assert_crlog 2 "$sb" "both must reach curl"
+	assert_arg "https://broken.example/rel" "$sb" "protocol-relative must become https"
+	ok "uppercase scheme + protocol-relative handled"
+}
+t
+
+test_case "internal links: query strings, %20 paths and %20 fragments"
+t() {
+	local sb
+	sb="$(gen_sb enc)"
+	mkdir -p "$sb/docs"
+	gen_md "$sb/docs/guide.md" '# Hello World\n'
+	gen_md "$sb/my file.md" 'ok\n'
+	gen_md "$sb/README.md" '[q](./docs/guide.md?plain=1#hello-world)\n[e](./docs/guide.md#hello%20world)\n[p](my%20file.md)\n'
+	run_check "$sb" INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "query, encoded path and encoded fragment must resolve"
+	ok "query/percent-encoding on internal links"
+}
+t
+
+test_case "HTML entities in href are decoded before the request"
+t() {
+	local sb
+	sb="$(gen_sb entity)"
+	gen_md "$sb/e.md" '<a href="https://ok.example/x?a=1&amp;b=2">x</a>\n'
+	run_check "$sb" INPUT_PATH=e.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "entity link must pass"
+	assert_arg "?a=1&b=2" "$sb" "&amp; must reach curl as &"
+	ok "HTML entity decoded"
+}
+t
+
+test_case "escaped markdown brackets and images are not links"
+t() {
+	local sb
+	sb="$(gen_sb escaped)"
+	# shellcheck disable=SC2016
+	gen_md "$sb/e.md" 'show \[x](https://broken.example/esc)\nshow \![y](https://broken.example/img)\n'
+	run_check "$sb" INPUT_PATH=e.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "escaped links must be ignored"
+	assert_crlog 0 "$sb" "escaped links must not reach curl"
+	ok "escaped brackets ignored"
+}
+t
+
+test_case "inline code spans are not treated as links"
+t() {
+	local sb
+	sb="$(gen_sb inline)"
+	# shellcheck disable=SC2016
+	gen_md "$sb/i.md" 'see `[x](https://broken.example/inline)`\n\nand ``[y](https://broken.example/double)``\n\nok [z](https://ok.example/z)\n'
+	run_check "$sb" INPUT_PATH=i.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "inline code links must be ignored"
+	assert_crlog 1 "$sb" "only the real link should hit curl"
+	ok "inline code spans masked"
+}
+t
+
+test_case "fence must close with the same character"
+t() {
+	local sb
+	sb="$(gen_sb fencechar)"
+	# shellcheck disable=SC2016
+	gen_md "$sb/f.md" '```markdown\n[x](https://broken.example/inside)\n~~~\n[y](https://broken.example/still)\n```\n[z](https://ok.example/z)\n'
+	run_check "$sb" INPUT_PATH=f.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "tilde fence must not close a backtick fence"
+	assert_crlog 1 "$sb" "both fenced links must be skipped"
+	ok "fence character/length matched"
+}
+t
+
+test_case "setext headings, closing hashes, link text, entities and code in headings"
+t() {
+	local sb
+	sb="$(gen_sb anchors)"
+	# shellcheck disable=SC2016
+	gen_md "$sb/h.md" 'Title Here
+==========
+
+## Foo ##
+
+## See [Docs](https://ok.example/docs) and `code`
+
+## A &amp; B
+
+[1](#title-here)
+[2](#foo)
+[3](#see-docs-and-code)
+[4](#a-b)
+'
+	run_check "$sb" INPUT_PATH=h.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "all advanced anchors must resolve"
+	ok "setext/closing-hash/link-text/entity heading anchors"
+}
+t
+
+test_case "badge wrapper link and bare HTML href are checked"
+t() {
+	local sb
+	sb="$(gen_sb badge)"
+	gen_md "$sb/b.md" '[![alt](https://ok.example/img.png)](https://broken.example/target)\n<a href=https://broken.example/bare>x</a>\n'
+	run_check "$sb" INPUT_PATH=b.md INPUT_RETRY_COUNT=0
+	assert_exit 1 "$sb" "badge target and bare href must be checked"
+	assert_json '[.[].link] | sort == ["https://broken.example/bare","https://broken.example/target"]' "$sb" "both targets must be reported"
+	ok "badge wrapper + bare HTML href"
+}
+t
+
+test_case "missing path fails loudly instead of silently passing"
+t() {
+	local sb
+	sb="$(gen_sb nopath)"
+	run_check "$sb" INPUT_PATH=/definitely/not/here
+	assert_exit 2 "$sb" "missing path must exit 2"
+	assert_grep "does not exist" "$sb/stderr" "missing path must be explained"
+	ok "missing path is a configuration error"
+}
+t
+
+test_case "404 is not retried, 5xx is"
+t() {
+	local sb
+	sb="$(gen_sb noretry)"
+	gen_md "$sb/f.md" '[x](https://broken.example/x)\n'
+	run_check "$sb" INPUT_PATH=f.md INPUT_RETRY_COUNT=3
+	assert_exit 1 "$sb" "404 must fail"
+	assert_crlog 1 "$sb" "404 must not be retried"
+	ok "retry only for transient statuses"
+}
+t
+
+test_case "annotations, count outputs and summary for a broken link"
+t() {
+	local sb
+	sb="$(gen_sb ann)"
+	gen_md "$sb/README.md" 'line1\nline2\n[x](https://broken.example/out)\n'
+	run_check "$sb" INPUT_RETRY_COUNT=0 GITHUB_ACTIONS=true
+	assert_out broken_count 1 "$sb"
+	assert_out checked_files 1 "$sb"
+	assert_out total_links 1 "$sb"
+	assert_summary "Markdown Link Checker" "$sb" "summary header missing"
+	assert_summary "https://broken.example/out" "$sb" "summary must list the link"
+	assert_grep '::error file=README.md,line=3,title=Broken link::' "$sb/stdout" "annotation missing"
+	ok "annotations + outputs + summary"
+}
+t
+
+test_case "missing config file warns and keeps inputs"
+t() {
+	local sb
+	sb="$(gen_sb nocfg)"
+	run_check "$sb" INPUT_CONFIG_FILE="$sb/nope.conf"
+	assert_exit 0 "$sb" "empty repo still passes"
+	assert_grep "not found" "$sb/stderr" "missing config must warn"
+	ok "missing config warning"
+}
+t
+
+test_case "CLI: --help, --version and unknown option"
+t() {
+	local sb
+	sb="$(gen_sb cliinfo)"
+	run_cli "$sb" --help
+	assert_exit 0 "$sb" "--help must exit 0"
+	assert_grep "Usage: check-links.sh" "$sb/stdout" "help text missing"
+	run_cli "$sb" --version
+	assert_exit 0 "$sb" "--version must exit 0"
+	assert_grep "check-links.sh 1.5" "$sb/stdout" "version missing"
+	run_cli "$sb" --nope
+	assert_exit 2 "$sb" "unknown option must exit 2"
+	assert_grep "unknown option" "$sb/stderr" "unknown option not explained"
+	ok "CLI help/version/unknown option"
+}
+t
+
+test_case "CLI: flags, --flag=value and positional files"
+t() {
+	local sb
+	sb="$(gen_sb cliflags)"
+	gen_md "$sb/a.md" '[x](https://ok.example/a)\n'
+	run_cli "$sb" --path=. --retry-count=0 --verbose a.md
+	assert_exit 0 "$sb" "CLI flags must run the check"
+	assert_out total_links 1 "$sb" "positional file must be checked"
+	assert_grep "✅ Link OK" "$sb/stdout" "--verbose must print successes"
+	ok "CLI flags, --flag=value, positional files"
+}
+t
+
+test_case "quiet hides per-file progress but keeps failures and summary"
+t() {
+	local sb
+	sb="$(gen_sb quiet)"
+	gen_md "$sb/README.md" '[x](https://broken.example/x)\n'
+	run_check "$sb" INPUT_QUIET=true INPUT_RETRY_COUNT=0
+	assert_exit 1 "$sb" "quiet must still fail"
+	refute_grep "Checking links in" "$sb/stdout" "quiet must hide per-file lines"
+	assert_grep "Broken link" "$sb/stdout" "quiet must keep failures"
+	assert_grep "Link Check Summary" "$sb/stdout" "quiet must keep the summary"
+	ok "quiet mode"
+}
+t
+
+test_case "ignore-urls supports glob patterns"
+t() {
+	local sb
+	sb="$(gen_sb igglob)"
+	gen_md "$sb/README.md" '[a](https://broken.example/x)\n[b](https://ok.example/y)\n'
+	run_check "$sb" INPUT_IGNORE_URLS="https://*.example/*" INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "glob-ignored urls must pass"
+	assert_crlog 0 "$sb" "glob ignore must skip every fetch"
+	ok "ignore-urls glob"
+}
+t
+
+test_case "multi-line HTML comments are skipped"
+t() {
+	local sb
+	sb="$(gen_sb mlcomment)"
+	gen_md "$sb/c.md" '<!--\n[nope](https://broken.example/hidden)\n-->\n\n[ok](https://ok.example/real)\n'
+	run_check "$sb" INPUT_PATH=c.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "links in comments must be ignored"
+	assert_crlog 1 "$sb" "only the real link should hit curl"
+	ok "multi-line HTML comments masked"
+}
+t
+
+test_case "literal spaces in URLs are percent-encoded"
+t() {
+	local sb
+	sb="$(gen_sb urlesc)"
+	gen_md "$sb/s.md" '[x](https://ok.example/a b)\n'
+	run_check "$sb" INPUT_PATH=s.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "space URL must pass"
+	assert_arg "https://ok.example/a%20b" "$sb" "space must be encoded for curl"
+	ok "spaces encoded"
+}
+t
+
+test_case "files input resolves inside path"
+t() {
+	local sb
+	sb="$(gen_sb pathfiles)"
+	mkdir -p "$sb/docs"
+	gen_md "$sb/docs/guide.md" '[x](https://ok.example/x)\n'
+	run_check "$sb" INPUT_PATH=docs INPUT_FILES=guide.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "file under path must be checked"
+	assert_grep "Checking links in docs/guide.md" "$sb/stdout" "path/file join missing"
+	ok "files resolved relative to path"
+}
+t
+
+test_case "files input accepts newline separators"
+t() {
+	local sb
+	sb="$(gen_sb nlfiles)"
+	gen_md "$sb/a.md" 'a\n'
+	gen_md "$sb/b.md" 'b\n'
+	run_check "$sb" INPUT_FILES=$'a.md\nb.md' INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "newline-separated files must pass"
+	assert_out checked_files 2 "$sb" "both newline-separated files checked"
+	ok "newline-separated files"
+}
+t
+
+test_case "empty scan warns, timeout 0 falls back, output has no ANSI"
+t() {
+	local sb
+	sb="$(gen_sb emptywarn)"
+	run_check "$sb"
+	assert_exit 0 "$sb" "empty repo still passes"
+	assert_grep "no Markdown files" "$sb/stderr" "empty scan must warn"
+	gen_md "$sb/a.md" '[x](https://ok.example/x)\n'
+	rm -f "$sb/exit" "$sb/curl.log"
+	run_check "$sb" INPUT_PATH=a.md INPUT_TIMEOUT=0 INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "timeout 0 must fall back to 10"
+	assert_grep "invalid TIMEOUT" "$sb/stderr" "timeout fallback must warn"
+	assert_arg "10" "$sb" "fallback timeout must reach curl"
+	if grep -q $'\033' "$sb/stdout"; then fail "non-TTY output must not contain ANSI"; fi
+	ok "empty warning, timeout fallback, no ANSI"
+}
+t
+
+test_case "explicit HTML id/name anchors resolve"
+t() {
+	local sb
+	sb="$(gen_sb htmlanchor)"
+	gen_md "$sb/a.md" '# Title\n\n<a id="custom-anchor"></a>\n<a name="legacy"></a>\n\n[jump](#custom-anchor)\n[old](#legacy)\n[top](#top)\n'
+	run_check "$sb" INPUT_PATH=a.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "explicit anchors must resolve"
+	ok "HTML id/name anchors"
+}
+t
+
+test_case "footnote syntax is not mistaken for reference links"
+t() {
+	local sb
+	sb="$(gen_sb footnote)"
+	gen_md "$sb/f.md" '# T\n\nText[^1] and more.\n\n[^1]: A note, not a link.\n'
+	run_check "$sb" INPUT_PATH=f.md INPUT_RETRY_COUNT=0
+	assert_exit 0 "$sb" "footnotes must not produce broken links"
+	assert_crlog 0 "$sb" "footnote text must not be fetched"
+	ok "footnotes ignored"
 }
 t
 
